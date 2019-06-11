@@ -12,7 +12,7 @@ spring:
         git:
           uri: git:/microservices-boilerplate/config-repo.git
           clone-on-start: true
-          passphrase: Sp@521657
+          passphrase: Sp@@@10101988
           strict-host-key-checking: false
           skip-ssl-validation: true
   security:
