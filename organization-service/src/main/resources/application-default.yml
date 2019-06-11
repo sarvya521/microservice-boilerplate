@@ -1,0 +1,5 @@
+spring:
+  cloud:
+    config:
+      name: ${ORGANIZATION_CONFIG}
+      uri: http://localhost:8088

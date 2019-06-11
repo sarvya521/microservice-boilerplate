@@ -1,0 +1,28 @@
+server:
+  port: 8888
+  
+spring:
+  cloud:
+    config:
+      allowOverride: true
+      failFast: true
+      overrideNone: true
+      overrideSystemProperties: false
+      server:
+        git:
+          uri: git:/microservices-boilerplate/config-repo.git
+          clone-on-start: true
+          passphrase: Sp@521657
+          strict-host-key-checking: false
+          skip-ssl-validation: true
+  security:
+    user:
+      name: root
+      password: s3cr3t
+    
+#encrypt:
+#  key-store:
+#    location: classpath:/config-server.jks
+#    password: my-s70r3-s3cr3t
+#    alias: config-server-key
+#    secret: my-k34-s3cr3t

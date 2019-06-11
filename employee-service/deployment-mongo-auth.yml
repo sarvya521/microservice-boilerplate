@@ -1,0 +1,243 @@
+#Create a Secret to hold the MONGO_INITDB_ROOT_USERNAME/PASSWORD
+#so we can enable authentication
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mongo-init-credentials
+  namespace: default
+type: Opaque
+data:
+    #echo -n "mongoadmin" | base64
+    init.userid: bW9uZ29hZG1pbg==
+    #echo -n "adminpassword" | base64
+    init.password: YWRtaW5wYXNzd29yZA==
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mongo-db
+data:
+  database-name: admin
+---
+# Create a secret to hold a keyfile used to authenticate between replicaset members
+# this seems to need to be base64 encoded twice (might not be the case if this
+# was an actual file reference as per the examples, but we're using a simple key
+# here
+apiVersion: v1
+data:
+  #echo -n "CHANGEMECHANGEMECHANGEME" | base64 | base64
+  mongodb-keyfile: UTBoQlRrZEZUVVZEU0VGT1IwVk5SVU5JUVU1SFJVMUYK
+kind: Secret
+metadata:
+  name: mongo-key
+  namespace: default
+type: Opaque
+---
+# Create a service account for Mongo and give it Pod List role
+# note this is a ClusterROleBinding - the Mongo Pod will be able
+# to list all pods present in the cluster regardless of namespace
+# (and this is exactly what it does...see below)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mongo-serviceaccount
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mongo-default-serviceaccount-view
+  namespace: default
+subjects:
+- kind: ServiceAccount
+  name: mongo-serviceaccount
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pod-viewer
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: pod-viewer
+  namespace: default
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["list"]
+---
+#Create a Storage Class for Google Container Engine
+#Note fstype: xfs isn't supported by GCE yet and the
+#Pod startup will hang if you try to specify it.
+kind: StorageClass
+apiVersion: storage.k8s.io/v1beta1
+metadata:
+  namespace: default
+  name: mongodb-ssd-storage
+provisioner: kubernetes.io/gce-pd
+parameters:
+  type: pd-ssd
+allowVolumeExpansion: true
+---
+#Headless Service for StatefulSets
+apiVersion: v1
+kind: Service
+metadata:
+  namespace: default
+  name: mongo-db
+  labels:
+    name: mongo-db
+spec:
+ ports:
+ - port: 27017
+   targetPort: 27017
+ clusterIP: None
+ selector:
+   app: mongo
+---
+# Now the fun part
+#
+apiVersion: apps/v1beta1
+kind: StatefulSet
+metadata:
+  namespace: default
+  name: mongo-db
+spec:
+  serviceName: mongo-db
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        # Labels MUST match MONGO_SIDECAR_POD_LABELS
+        # and MUST differentiate between other mongo
+        # instances in the CLUSTER not just the namespace
+        # as the sidecar will search the entire cluster
+        # for something to configure
+        app: mongo
+        environment: default
+    spec:
+      #Run the Pod using the service account
+      serviceAccountName: mongo-serviceaccount
+      terminationGracePeriodSeconds: 10
+      #Prevent a Mongo Replica running on the same node as another (avoid single point of failure)
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - mongo
+            topologyKey: "kubernetes.io/hostname"
+      containers:
+        - name: mongo
+          image: mongo
+          command:
+            #Authentication adapted from https://gist.github.com/thilinapiy/0c5abc2c0c28efe1bbe2165b0d8dc115
+            #in order to pass the new admin user id and password in
+          - /bin/sh
+          - -c
+          - >
+            if [ -f /data/db/admin-user.lock ]; then
+              echo "KUBERNETES LOG $HOSTNAME- Starting Mongo Daemon with runtime settings (clusterAuthMode)"
+              #ensure wiredTigerCacheSize is set within the size of the containers memory limit
+              mongod --wiredTigerCacheSizeGB 0.25 --replSet rs0 --bind_ip 0.0.0.0 --smallfiles --noprealloc --clusterAuthMode keyFile --keyFile /etc/secrets-volume/mongodb-keyfile --setParameter authenticationMechanisms=SCRAM-SHA-1;
+            else
+              echo "KUBERNETES LOG $HOSTNAME- Starting Mongo Daemon with setup setting (authMode)"
+              mongod --auth;
+            fi;
+          lifecycle:
+              postStart:
+                exec:
+                  command:
+                  - /bin/sh
+                  - -c
+                  - >
+                    if [ ! -f /data/db/admin-user.lock ]; then
+                      echo "KUBERNETES LOG $HOSTNAME- no Admin-user.lock file found yet"
+                      #upped this to 20 to 'ensure' mongod is accepting connections
+                      sleep 20;
+                      touch /data/db/admin-user.lock
+                      if [ "$HOSTNAME" = "mongo-db-0" ]; then
+                        echo "KUBERNETES LOG $HOSTNAME- creating admin user ${MONGODB_USERNAME}"
+                        mongo --eval "db = db.getSiblingDB('admin'); db.createUser({ user: '${MONGODB_USERNAME}', pwd: '${MONGODB_PASSWORD}', roles: [{ role: 'root', db: 'admin' }]});" >> /data/db/config.log
+                      fi;
+                      echo "KUBERNETES LOG $HOSTNAME-shutting mongod down for final restart"
+                      mongod --shutdown;
+                    fi;
+                    if [ -f /data/db/admin-user.lock ]; then
+                      mongod --auth;
+                    fi;
+                    if [ ! -f /data/db/admin-user.lock ]; then
+                      sleep 20;
+                      touch /data/db/admin-user.lock
+                      if [ "$HOSTNAME" = "mongo-db-0" ]; then
+                        mongo --eval "use msdemo; db.test.insert({"name":"abc"}); db = db.getSiblingDB('demo'); db.createUser({ user: 'unify', pwd: 'unify', roles: [{ role: 'userAdminAnyDatabase', db: 'msdemo' }]});" >> /data/db/config.log
+                      fi;
+                      echo "KUBERNETES LOG $HOSTNAME-shutting mongod down for final restart"
+                      mongod --shutdown;
+                    fi;
+          env:
+            - name: MONGODB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-init-credentials
+                  key: init.userid
+            - name: MONGODB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-init-credentials
+                  key: init.password
+          ports:
+            - containerPort: 27017
+          resources:
+            requests:
+              memory: "250Mi"
+            limits:
+              memory: "350Mi"
+          volumeMounts:
+            - name: mongo-key
+              mountPath: "/etc/secrets-volume"
+              readOnly: true
+            - name: mongo-persistent-storage
+              mountPath: /data/db
+        - name: mongo-sidecar
+          image: cvallance/mongo-k8s-sidecar
+          env:
+            # Sidecar searches for any POD in the CLUSTER with these labels
+            # not just the namespace..so we need to ensure the POD is labelled
+            # to differentiate it from other PODS in different namespaces
+            - name: MONGO_SIDECAR_POD_LABELS
+              value: "app=mongo,environment=default"
+            - name: MONGODB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-init-credentials
+                  key: init.userid
+            - name: MONGODB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-init-credentials
+                  key: init.password
+            #don't be fooled by this..it's not your DB that
+            #needs specifying, it's the admin DB as that
+            #is what you authenticate against with mongo.
+            - name: MONGODB_DATABASE
+              value: admin
+      volumes:
+      - name: mongo-key
+        secret:
+          defaultMode: 0400
+          secretName: mongo-key
+  volumeClaimTemplates:
+  - metadata:
+      name: mongo-persistent-storage
+      annotations:
+        volume.beta.kubernetes.io/storage-class: "mongodb-ssd-storage"
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 1Gi

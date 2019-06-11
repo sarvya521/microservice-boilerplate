@@ -1,0 +1,5 @@
+spring:
+  application:
+    name: organization-service
+  profiles:
+    active: local

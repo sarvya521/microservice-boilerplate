@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    run: department-service
+  name: department-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      run: department-service
+  strategy: {}
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        run: department-service
+    spec:
+      containers:
+      - image: docker.io/unify453/microservice-demo:department-service
+        imagePullPolicy: Always
+        name: department-service
+        ports:
+        - containerPort: 8080
+        resources: {}
+status: {}
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    run: department-service
+  name: department-service
+spec:
+  ports:
+  - port: 8080
+    protocol: TCP
+    targetPort: 8080
+  selector:
+    run: department-service
+  type: NodePort
